@@ -1,0 +1,112 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: adx-exchange
+  namespace: adx
+  labels:
+    app: adx-exchange
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: adx-exchange
+  template:
+    metadata:
+      labels:
+        app: adx-exchange
+    spec:
+      containers:
+      - name: adx-exchange
+        image: luxfi/adx:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8080
+          name: http
+        - containerPort: 8081
+          name: websocket
+        env:
+        - name: FDB_CLUSTER_FILE
+          value: /etc/foundationdb/fdb.cluster
+        - name: FLOOR_CPM
+          value: "0.50"
+        - name: AUCTION_TIMEOUT
+          value: "100ms"
+        - name: LOG_LEVEL
+          value: "info"
+        - name: REDIS_URL
+          value: "redis://redis-service:6379"
+        volumeMounts:
+        - name: fdb-cluster
+          mountPath: /etc/foundationdb
+        - name: data
+          mountPath: /app/data
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "2000m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 5
+      volumes:
+      - name: fdb-cluster
+        configMap:
+          name: fdb-cluster-config
+      - name: data
+        persistentVolumeClaim:
+          claimName: adx-data-pvc
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: adx-exchange-service
+  namespace: adx
+spec:
+  selector:
+    app: adx-exchange
+  ports:
+  - name: http
+    port: 8080
+    targetPort: 8080
+  - name: websocket
+    port: 8081
+    targetPort: 8081
+  type: LoadBalancer
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: adx-data-pvc
+  namespace: adx
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Gi
+  storageClassName: fast-ssd
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fdb-cluster-config
+  namespace: adx
+data:
+  fdb.cluster: |
+    # FoundationDB cluster configuration
+    # cluster_id:description@coordinator1:port,coordinator2:port
+    adx:adx-cluster@fdb-0.fdb-service.adx.svc.cluster.local:4500,fdb-1.fdb-service.adx.svc.cluster.local:4500,fdb-2.fdb-service.adx.svc.cluster.local:4500

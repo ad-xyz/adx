@@ -1,0 +1,156 @@
+version: '3.8'
+
+services:
+  # FoundationDB cluster
+  fdb-coordinator:
+    image: foundationdb/foundationdb:7.3.27
+    container_name: fdb-coordinator
+    hostname: fdb-coordinator
+    environment:
+      - FDB_CLUSTER_FILE=/var/fdb/fdb.cluster
+      - FDB_COORDINATOR=1
+    volumes:
+      - fdb-data:/var/fdb/data
+      - fdb-logs:/var/fdb/logs
+      - ./fdb.cluster:/var/fdb/fdb.cluster
+    networks:
+      - adx-network
+    ports:
+      - "4500:4500"
+
+  fdb-storage:
+    image: foundationdb/foundationdb:7.3.27
+    container_name: fdb-storage
+    hostname: fdb-storage
+    environment:
+      - FDB_CLUSTER_FILE=/var/fdb/fdb.cluster
+    volumes:
+      - fdb-data:/var/fdb/data
+      - fdb-logs:/var/fdb/logs
+      - ./fdb.cluster:/var/fdb/fdb.cluster
+    depends_on:
+      - fdb-coordinator
+    networks:
+      - adx-network
+    deploy:
+      replicas: 3
+
+  # ADX Exchange
+  adx-exchange:
+    build: .
+    container_name: adx-exchange
+    environment:
+      - FDB_CLUSTER_FILE=/etc/foundationdb/fdb.cluster
+      - FLOOR_CPM=0.50
+      - AUCTION_TIMEOUT=100ms
+      - LOG_LEVEL=info
+    volumes:
+      - ./fdb.cluster:/etc/foundationdb/fdb.cluster
+      - adx-data:/app/data
+    ports:
+      - "8080:8080"  # HTTP API
+      - "8081:8081"  # WebSocket
+    depends_on:
+      - fdb-coordinator
+      - fdb-storage
+      - redis
+    networks:
+      - adx-network
+    restart: unless-stopped
+
+  # Redis for caching
+  redis:
+    image: redis:7-alpine
+    container_name: adx-redis
+    command: redis-server --appendonly yes
+    volumes:
+      - redis-data:/data
+    ports:
+      - "6379:6379"
+    networks:
+      - adx-network
+    restart: unless-stopped
+
+  # Prometheus for metrics
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: adx-prometheus
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+    ports:
+      - "9090:9090"
+    networks:
+      - adx-network
+    restart: unless-stopped
+
+  # Grafana for visualization
+  grafana:
+    image: grafana/grafana:latest
+    container_name: adx-grafana
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin123
+      - GF_INSTALL_PLUGINS=redis-datasource
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+    networks:
+      - adx-network
+    restart: unless-stopped
+
+  # NGINX reverse proxy
+  nginx:
+    image: nginx:alpine
+    container_name: adx-nginx
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf
+      - ./nginx/ssl:/etc/nginx/ssl
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      - adx-exchange
+    networks:
+      - adx-network
+    restart: unless-stopped
+
+  # Home Miner (example)
+  adx-miner:
+    build: .
+    container_name: adx-miner
+    command: ["/app/adx-miner", "start", "--wallet", "0x0000000000000000000000000000000000000000", "--tunnel", "direct", "--port", "8888"]
+    environment:
+      - ADX_EXCHANGE_URL=http://adx-exchange:8080
+      - CACHE_SIZE=10GB
+    volumes:
+      - miner-cache:/app/cache
+    ports:
+      - "8888:8888"
+    depends_on:
+      - adx-exchange
+    networks:
+      - adx-network
+    restart: unless-stopped
+
+networks:
+  adx-network:
+    driver: bridge
+
+volumes:
+  fdb-data:
+  fdb-logs:
+  adx-data:
+  redis-data:
+  prometheus-data:
+  grafana-data:
+  miner-cache:
