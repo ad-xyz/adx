@@ -1,9 +1,12 @@
 package rtb
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"math/big"
+	"net/http"
 	"sync"
 	"time"
 
@@ -47,20 +50,34 @@ type DSPConnection struct {
 	ID           string
 	Name         string
 	Endpoint     string
+	APIKey       string
+	Protocol     string // openrtb, prebid, amazon_uap, google_adx, thetradedesk
 	QPS          int
 	Timeout      time.Duration
 	BidderCode   string
 	SeatID       string
 	
+	// ADXYZ support
+	SupportsADXYZ bool
+	AUSDWallet    string
+	
 	// Performance tracking
-	RequestCount uint64
-	BidCount     uint64
-	WinCount     uint64
-	ErrorCount   uint64
-	AvgLatency   time.Duration
+	Stats        DSPStats
 	
 	// Rate limiting
 	RateLimiter  *RateLimiter
+	mu           sync.Mutex
+}
+
+// DSPStats tracks DSP performance
+type DSPStats struct {
+	RequestCount  uint64
+	BidsReceived  uint64
+	NoBids        uint64
+	WinsNotified  uint64
+	RequestErrors uint64
+	TotalSpend    float64
+	AvgLatency    time.Duration
 }
 
 // SSPConnection represents a Supply Side Platform
@@ -318,15 +335,15 @@ func (rtb *RTBExchange) collectBids(ctx context.Context, req *openrtb2.BidReques
 			// Send bid request
 			bid, err := d.SendBidRequest(ctx, req)
 			if err != nil {
-				d.ErrorCount++
+				d.Stats.RequestErrors++
 				return
 			}
 			
 			if bid != nil {
 				bidChan <- *bid
-				d.BidCount++
+				d.Stats.BidsReceived++
 			}
-			d.RequestCount++
+			d.Stats.RequestCount++
 		}(dsp)
 	}
 	
@@ -356,17 +373,26 @@ func (rtb *RTBExchange) collectBids(ctx context.Context, req *openrtb2.BidReques
 
 // Bid represents a bid from a DSP
 type Bid struct {
-	ID           string
-	ImpID        string
-	Price        float64
-	AdID         string
-	Creative     string
-	DSP          string
-	SeatID       string
-	DealID       string
-	Categories   []string
-	Advertiser   string
-	Brand        string
+	ID            string
+	ImpID         string
+	Price         float64
+	AdID          string
+	CrID          string
+	CreativeURL   string
+	VAST          string
+	DSPID         string
+	SeatID        string
+	DealID        string
+	Categories    []string
+	AdvertiserDom []string
+	Brand         string
+	Width         *int64
+	Height        *int64
+	Timestamp     time.Time
+	ADXYZEnabled  bool
+	EscrowID      string
+	WinURL        string
+	LossURL       string
 }
 
 // runAuction to determine winner
@@ -417,8 +443,10 @@ func (rtb *RTBExchange) checkBrandSafety(bid *Bid, req *openrtb2.BidRequest) boo
 	// Check blocked advertisers
 	if req.BAdv != nil {
 		for _, blocked := range req.BAdv {
-			if bid.Advertiser == blocked {
-				return false
+			for _, adDomain := range bid.AdvertiserDom {
+				if adDomain == blocked {
+					return false
+				}
 			}
 		}
 	}
@@ -448,9 +476,9 @@ func (rtb *RTBExchange) buildResponse(winner *Bid, req *openrtb2.BidRequest) *op
 						ImpID: winner.ImpID,
 						Price: winner.Price,
 						AdID:  winner.AdID,
-						AdM:   winner.Creative,
+						AdM:   winner.VAST,
 						Cat:   winner.Categories,
-						ADomain: []string{winner.Advertiser},
+						ADomain: winner.AdvertiserDom,
 					},
 				},
 			},
@@ -546,11 +574,123 @@ func min(a, b int) int {
 	return b
 }
 
-// SendBidRequest to DSP (implement based on DSP protocol)
+// SendBidRequest sends bid request to DSP
 func (dsp *DSPConnection) SendBidRequest(ctx context.Context, req *openrtb2.BidRequest) (*Bid, error) {
-	// TODO: Implement HTTP/gRPC call to DSP
-	// This would make actual network call to DSP endpoint
-	return nil, nil
+	dsp.mu.Lock()
+	defer dsp.mu.Unlock()
+
+	// Add ADXYZ settlement extension if enabled
+	if dsp.SupportsADXYZ {
+		ext := map[string]interface{}{
+			"adxyz": map[string]interface{}{
+				"settlement":     "ausd",
+				"escrow_enabled": true,
+				"ttl_ms":         2000,
+				"delivery_proof": "required",
+				"wallet":         dsp.AUSDWallet,
+			},
+		}
+		extBytes, _ := json.Marshal(ext)
+		req.Ext = extBytes
+	}
+
+	// Prepare HTTP request
+	reqBody, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal bid request: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", dsp.Endpoint, bytes.NewReader(reqBody))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create HTTP request: %w", err)
+	}
+
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("x-openrtb-version", "2.5")
+	if dsp.APIKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer " + dsp.APIKey)
+	}
+
+	// Send request with timeout
+	client := &http.Client{
+		Timeout: dsp.Timeout,
+		Transport: &http.Transport{
+			MaxIdleConns:        100,
+			MaxIdleConnsPerHost: 10,
+			IdleConnTimeout:     90 * time.Second,
+		},
+	}
+
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		dsp.Stats.RequestErrors++
+		return nil, fmt.Errorf("HTTP request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNoContent {
+		// DSP chose not to bid
+		dsp.Stats.NoBids++
+		return nil, nil
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		dsp.Stats.RequestErrors++
+		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+	}
+
+	// Parse OpenRTB bid response
+	var bidResp openrtb2.BidResponse
+	if err := json.NewDecoder(resp.Body).Decode(&bidResp); err != nil {
+		return nil, fmt.Errorf("failed to decode bid response: %w", err)
+	}
+
+	// Extract first bid (simplified for now)
+	if len(bidResp.SeatBid) == 0 || len(bidResp.SeatBid[0].Bid) == 0 {
+		dsp.Stats.NoBids++
+		return nil, nil
+	}
+
+	ortbBid := bidResp.SeatBid[0].Bid[0]
+
+	// Check for ADXYZ settlement confirmation
+	var hasADXYZ bool
+	if ortbBid.Ext != nil {
+		var ext map[string]interface{}
+		if err := json.Unmarshal(ortbBid.Ext, &ext); err == nil {
+			if adxyz, ok := ext["adxyz"].(map[string]interface{}); ok {
+				hasADXYZ = adxyz["confirmed"] == true
+			}
+		}
+	}
+
+	bid := &Bid{
+		ID:            ortbBid.ID,
+		ImpID:         ortbBid.ImpID,
+		Price:         ortbBid.Price,
+		AdID:          ortbBid.AdID,
+		CrID:          ortbBid.CrID,
+		DealID:        ortbBid.DealID,
+		DSPID:         dsp.ID,
+		SeatID:        dsp.SeatID,
+		Timestamp:     time.Now(),
+		ADXYZEnabled:  hasADXYZ,
+		CreativeURL:   ortbBid.NURL,
+		Width:         &ortbBid.W,
+		Height:        &ortbBid.H,
+		Categories:    ortbBid.Cat,
+		AdvertiserDom: ortbBid.ADomain,
+	}
+
+	// Extract VAST from AdM if present
+	if ortbBid.AdM != "" {
+		bid.VAST = ortbBid.AdM
+	}
+
+	dsp.Stats.BidsReceived++
+	dsp.Stats.TotalSpend += bid.Price
+
+	return bid, nil
 }
 
 // convertCTVToOpenRTB converts CTV request to OpenRTB
