@@ -8,9 +8,9 @@ import (
 	"errors"
 	"math/big"
 
-	"github.com/luxfi/crypto/hashing"
-	"github.com/luxfi/ids"
-	"github.com/luxfi/log"
+	"github.com/luxfi/adx/pkg/crypto/hashing"
+	"github.com/luxfi/adx/pkg/ids"
+	"github.com/luxfi/adx/pkg/log"
 )
 
 var (

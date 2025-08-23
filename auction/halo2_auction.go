@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/luxfi/adx/proof/halo2"
-	"github.com/luxfi/ids"
-	"github.com/luxfi/log"
+	"github.com/luxfi/adx/pkg/ids"
+	"github.com/luxfi/adx/pkg/log"
 )
 
 var (

@@ -9,8 +9,8 @@ import (
 	"fmt"
 	"math/big"
 
-	"github.com/luxfi/crypto/hashing"
-	"github.com/luxfi/log"
+	"github.com/luxfi/adx/pkg/crypto/hashing"
+	"github.com/luxfi/adx/pkg/log"
 )
 
 var (

@@ -13,7 +13,7 @@ import (
 	"golang.org/x/crypto/hkdf"
 	"golang.org/x/crypto/sha3"
 	
-	"github.com/luxfi/crypto/hashing"
+	"github.com/luxfi/adx/pkg/crypto/hashing"
 )
 
 var (

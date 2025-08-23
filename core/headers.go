@@ -6,7 +6,7 @@ package core
 import (
 	"time"
 
-	"github.com/luxfi/ids"
+	"github.com/luxfi/adx/pkg/ids"
 )
 
 // HeaderType defines the type of header in the ad network
