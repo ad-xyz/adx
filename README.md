@@ -1,14 +1,11 @@
-# LuxFi ADX - Unified Privacy-Preserving Ad Exchange
+# ADX - High-Performance CTV Ad Exchange
 
-[![License](https://img.shields.io/badge/license-Proprietary-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Go Version](https://img.shields.io/badge/go-1.24.5-blue.svg)](go.mod)
 
 ## Overview
 
-LuxFi ADX combines two powerful ad exchange systems into a unified privacy-preserving platform:
-
-1. **CTV Ad Exchange**: High-performance Connected TV (CTV) ad exchange handling **100M+ impressions per day** with sub-millisecond latency
-2. **Privacy-Preserving Network**: Blockchain-based ad network with ZK proofs, HPKE encryption, and zero-knowledge auctions
+ADX is a high-performance Connected TV (CTV) ad exchange designed to handle **100M+ impressions per day** with sub-millisecond latency. It features VAST 4.x video ad support, OpenRTB 2.5/3.0 programmatic bidding, and a unique home miner network for decentralized ad serving.
 
 ## Dual Architecture
 
